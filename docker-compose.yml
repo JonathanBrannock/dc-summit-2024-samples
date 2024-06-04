@@ -1,0 +1,203 @@
+version: '3.8'
+
+x-logging:
+  &default-logging
+  driver: "fluentd"
+  options:
+    fluentd-address: "localhost:24224"
+    fluentd-async: "true"
+    labels: service,com.docker.compose.service,site
+    tag: "{{.Name}}/{{.ID}}"
+
+services:
+  my-nifi-prod:
+    image: apache/nifi:1.26.0
+    container_name: my-nifi-prod
+    restart: always
+    ports:
+        - 443:8443
+    environment:
+      - NIFI_WEB_PROXY_HOST=<insert your host name>
+      - NIFI_WEB_HTTPS_PORT=8443
+      - NIFI_WEB_HTTPS_HOST=my-nifi-prod
+      - NIFI_REMOTE_INPUT_HOST=my-nifi-prod
+      - NIFI_JVM_HEAP_INIT=16G
+      - NIFI_JVM_HEAP_MAX=16G
+      - KEYSTORE_PATH=<insert your pkcs12 certificate, must match the host name>
+      - KEYSTORE_TYPE=PKCS12
+      - KEYSTORE_PASSWORD=<pkcs12 password>
+      - TRUSTSTORE_PATH=<your CA in a Java JKS TrustStore>
+      - TRUSTSTORE_PASSWORD=<JKS TrustStore password>
+      - TRUSTSTORE_TYPE=JKS
+      - NIFI_SENSITIVE_PROPS_KEY=<insert your sensitive props key>
+      - SINGLE_USER_CREDENTIALS_USERNAME=Admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=<your admin password>
+      - NIFI_SECURITY_USER_AUTHORIZER=single-user-authorizer
+      - NIFI_SECURITY_USER_LOGIN_IDENTITY_PROVIDER=single-user-provider
+      - AUTH=tls
+    volumes:
+      - ./node1-prod:/opt/nifi/nifi-current/flow
+      - ./certs:/opt/nifi/certs
+      - prod_logs:/opt/nifi/nifi-current/logs
+      # - prod_conf:/opt/nifi/nifi-current/conf
+      - prod_database_repository:/opt/nifi/nifi-current/database_repository
+      - prod_flowfile_repository:/opt/nifi/nifi-current/flowfile_repository
+      - prod_content_repository:/opt/nifi/nifi-current/content_repository  # this may need to be remapped to take advantage of faster ephemeral storage.
+      - prod_provenance_repository:/opt/nifi/nifi-current/provenance_repository
+      - prod_state:/opt/nifi/nifi-current/state
+    entrypoint:
+      - sh
+      - -c 
+      - |
+        [ -f "/opt/nifi/scripts/common.sh" ] && . "/opt/nifi/scripts/common.sh"
+        # This is where you can do additional things that are not provided with the Official NiFi container. 
+        # These can be additional prop_replace entries, sed commands or anything else that can be done as the container user.
+        # There is no need to build a new container image, and upgrades are simplified. 
+        
+        # prop_replace 'nifi.web.https.port' "${NIFI_WEB_HTTPS_PORT:-8443}"
+        prop_replace 'nifi.flowcontroller.autoResumeState' "true"
+        prop_replace 'nifi.content.claim.max.appendable.size' "1 MB"
+        prop_replace 'nifi.content.repository.archive.enabled' "false"
+        prop_replace 'nifi.provenance.repository.max.storage.time' "5 days"
+        prop_replace 'nifi.provenance.repository.max.storage.size' "1 GB"
+        prop_replace 'nifi.sensitive.props.algorithm' "NIFI_PBKDF2_AES_GCM_256"
+        # prop_add_or_replace 'nifi.sensitive.props.provider' "BC"
+
+        # Reduce the log history, so the instance doesn't use too much disk space. 
+        sed -i 's/<maxHistory>.*<\/maxHistory>/<maxHistory>5<\/maxHistory>/g' conf/logback.xml
+        sed -i 's/<maxHistory>.*<\/maxHistory>/<maxHistory>5<\/maxHistory>/g' conf/stateless-logback.xml
+
+        # nifi.flow.configuration.file=./conf/flow.xml.gz
+        mkdir /opt/nifi/nifi-current/flow
+        prop_replace 'nifi.flow.configuration.file' "/opt/nifi/nifi-current/flow/flow.xml.gz"
+        # nifi.flow.configuration.json.file=./conf/flow.json.gz
+        prop_replace 'nifi.flow.configuration.json.file' "/opt/nifi/nifi-current/flow/flow.json.gz"
+        # nifi.flow.configuration.archive.dir=./conf/archive/
+        mkdir /opt/nifi/nifi-current/flow/archive
+        prop_replace 'nifi.flow.configuration.archive.dir' "/opt/nifi/nifi-current/flow/archive/"
+
+        mkdir /opt/nifi/nifi-current/flow/new
+        echo "Copy new flow.xml.gz and flow.json.gz into /opt/nifi/nifi-current/flow/new to overwrite the existing flow on next boot."
+        if [ -e new/flow.xml.gz ]
+        then mv -fv /opt/nifi/nifi-current/flow/new/flow.xml.gz /opt/nifi/nifi-current/flow/flow.xml.gz
+        fi
+        
+        if [ -e new/flow.xml.gz ]
+        then mv -fv /opt/nifi/nifi-current/flow/new/flow.json.gz /opt/nifi/nifi-current/flow/flow.json.gz
+        fi
+
+        . "/opt/nifi/scripts/start.sh"
+    logging: *default-logging
+
+  my-nifi-prov:
+    image: apache/nifi:1.26.0
+    container_name: my-nifi-prov
+    restart: always
+    ports:
+        - 8443:8443
+    environment:
+      - NIFI_WEB_PROXY_HOST=<insert your host name>:8443
+      - NIFI_WEB_HTTPS_PORT=8443
+      - NIFI_WEB_HTTPS_HOST=my-nifi-prov
+      - NIFI_REMOTE_INPUT_HOST=my-nifi-prov
+      - NIFI_JVM_HEAP_INIT=512m
+      - NIFI_JVM_HEAP_MAX=512m
+      - KEYSTORE_PATH=<insert your pkcs12 certificate, must match the host name>
+      - KEYSTORE_TYPE=PKCS12
+      - KEYSTORE_PASSWORD=<pkcs12 password>
+      - TRUSTSTORE_PATH=<your CA in a Java JKS TrustStore>
+      - TRUSTSTORE_PASSWORD=<JKS TrustStore password>
+      - TRUSTSTORE_TYPE=JKS
+      - NIFI_SENSITIVE_PROPS_KEY=<insert your sensitive props key>
+      - SINGLE_USER_CREDENTIALS_USERNAME=Admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=<your admin password>
+      - NIFI_SECURITY_USER_AUTHORIZER=single-user-authorizer
+      - NIFI_SECURITY_USER_LOGIN_IDENTITY_PROVIDER=single-user-provider
+      - AUTH=tls
+    volumes:
+      - ./node1-prov:/opt/nifi/nifi-current/flow
+      - ./certs:/opt/nifi/certs
+      - prov_logs:/opt/nifi/nifi-current/logs
+      - prov_database_repository:/opt/nifi/nifi-current/database_repository
+      - prov_flowfile_repository:/opt/nifi/nifi-current/flowfile_repository
+      - prov_content_repository:/opt/nifi/nifi-current/content_repository
+      - prov_provenance_repository:/opt/nifi/nifi-current/provenance_repository
+      - prov_state:/opt/nifi/nifi-current/state
+    entrypoint:
+      - sh
+      - -c 
+      - |
+        [ -f "/opt/nifi/scripts/common.sh" ] && . "/opt/nifi/scripts/common.sh"
+
+        # prop_replace 'nifi.web.https.port' "${NIFI_WEB_HTTPS_PORT:-8443}"
+        prop_replace 'nifi.flowcontroller.autoResumeState' "true"
+        prop_replace 'nifi.content.claim.max.appendable.size' "1 MB"
+        prop_replace 'nifi.content.repository.archive.enabled' "false"
+        prop_replace 'nifi.provenance.repository.max.storage.time' "5 days"
+        prop_replace 'nifi.provenance.repository.max.storage.size' "1 GB"
+        prop_replace 'nifi.sensitive.props.algorithm' "NIFI_PBKDF2_AES_GCM_256"
+        # prop_add_or_replace 'nifi.sensitive.props.provider' "BC"
+
+        sed -i 's/<maxHistory>.*<\/maxHistory>/<maxHistory>5<\/maxHistory>/g' conf/logback.xml
+        sed -i 's/<maxHistory>.*<\/maxHistory>/<maxHistory>5<\/maxHistory>/g' conf/stateless-logback.xml
+
+        # nifi.flow.configuration.file=./conf/flow.xml.gz
+        mkdir /opt/nifi/nifi-current/flow
+        prop_replace 'nifi.flow.configuration.file' "/opt/nifi/nifi-current/flow/flow.xml.gz"
+        # nifi.flow.configuration.json.file=./conf/flow.json.gz
+        prop_replace 'nifi.flow.configuration.json.file' "/opt/nifi/nifi-current/flow/flow.json.gz"
+        # nifi.flow.configuration.archive.dir=./conf/archive/
+        mkdir /opt/nifi/nifi-current/flow/archive
+        prop_replace 'nifi.flow.configuration.archive.dir' "/opt/nifi/nifi-current/flow/archive/"
+
+        mkdir /opt/nifi/nifi-current/flow/new
+        echo "Copy new flow.xml.gz and flow.json.gz into /opt/nifi/nifi-current/flow/new to overwrite the existing flow on boot."
+        if [ -e new/flow.xml.gz ]
+        then mv -fv /opt/nifi/nifi-current/flow/new/flow.xml.gz /opt/nifi/nifi-current/flow/flow.xml.gz
+        fi
+        
+        if [ -e new/flow.xml.gz ]
+        then mv -fv /opt/nifi/nifi-current/flow/new/flow.json.gz /opt/nifi/nifi-current/flow/flow.json.gz
+        fi
+
+        . "/opt/nifi/scripts/start.sh"
+    logging: *default-logging
+  
+  
+  fluent-bit:
+    ports:
+      - 24224:24224
+    image: cr.fluentbit.io/fluent/fluent-bit:2.0
+    restart: always
+    environment:
+      - AWS_ACCESS_KEY_ID=<your logging access key, or remove to use EC2 execution role>
+      - AWS_SECRET_ACCESS_KEY=<your logging secret access key, or remove to use EC2 execution role>
+    container_name: fluent-bit
+    command: -i forward -F multiline -p buffer -o cloudwatch_logs -p log_group_name=fluent-bit -p log_stream_prefix=nifi-aws-1- -p region=us-east-1
+    logging: *default-logging
+  
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+    command: "redis-server --save 60 1 --loglevel warning"
+    volumes:
+      - cache_redis:/data
+    logging: *default-logging
+
+volumes:
+  prod_logs:  # /opt/nifi/nifi-current/logs
+  prod_conf:  # /opt/nifi/nifi-current/conf
+  prod_database_repository:  # /opt/nifi/nifi-current/database_repository
+  prod_flowfile_repository:  # /opt/nifi/nifi-current/flowfile_repository
+  prod_content_repository:  # /opt/nifi/nifi-current/content_repository
+  prod_provenance_repository:  # /opt/nifi/nifi-current/provenance_repository
+  prod_state:  # /opt/nifi/nifi-current/state
+  prov_logs:  # /opt/nifi/nifi-current/logs
+  prov_conf:  # /opt/nifi/nifi-current/conf
+  prov_database_repository:  # /opt/nifi/nifi-current/database_repository
+  prov_flowfile_repository:  # /opt/nifi/nifi-current/flowfile_repository
+  prov_content_repository:  # /opt/nifi/nifi-current/content_repository
+  prov_provenance_repository:  # /opt/nifi/nifi-current/provenance_repository
+  prov_state:  # /opt/nifi/nifi-current/state
+  cache_redis:  # /data
